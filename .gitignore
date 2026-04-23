@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Project artifacts
+data/outputs/*
+!data/outputs/.gitkeep
+data/samples/*
+!data/samples/.gitkeep
+
+# Logs and caches
+*.log
+.cache/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Model / embedding caches (can get large)
+*.npy
+*.npz
+*.pkl
+*.joblib
+
+# Downloaded video files (we intentionally avoid persisting source video)
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
