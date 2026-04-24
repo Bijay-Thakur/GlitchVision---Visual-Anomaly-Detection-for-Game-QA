@@ -15,15 +15,25 @@ ENV/
 .DS_Store
 Thumbs.db
 *.swp
+.qodo/
 
 # Streamlit
 .streamlit/secrets.toml
 
-# Project artifacts
+# Internal / private docs (tracker, deep dive, interview notes, etc.)
+docs/
+
+# Per-run outputs (user-specific, regenerated on every run)
 data/outputs/*
 !data/outputs/.gitkeep
+
+# User-supplied sample clips (never commit video content)
 data/samples/*
 !data/samples/.gitkeep
+
+# User-built reference embedding banks
+data/reference_banks/*
+!data/reference_banks/.gitkeep
 
 # Logs and caches
 *.log

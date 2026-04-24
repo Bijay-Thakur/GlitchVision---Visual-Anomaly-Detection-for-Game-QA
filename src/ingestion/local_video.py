@@ -64,11 +64,3 @@ def save_uploaded_file(
     path = Path(tmp.name)
     display = original_name or os.path.basename(tmp.name)
     return LocalVideoSource(path=path, display_name=display, is_temp=True)
-
-
-def from_path(path: str | Path) -> LocalVideoSource:
-    """Wrap an existing path on disk as a ``LocalVideoSource``."""
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Video file not found: {p}")
-    return LocalVideoSource(path=p, display_name=p.name, is_temp=False)

@@ -1,79 +1,104 @@
 # GlitchVision
 
-**Unsupervised visual anomaly detection for gameplay footage.**
-ResNet-18 embeddings + Isolation Forest. CPU-only. Streamlit UI.
+**Visual regression triage for gameplay and simulation footage.**
+CPU-first. ResNet-18 embeddings + Isolation Forest, reference-based
+kNN, and a hybrid blend, with segment-level analysis and a synthetic
+benchmark. Streamlit UI.
 
-GlitchVision is a practical MVP that helps a human QA reviewer triage long
-gameplay videos by surfacing the frames that *look different from everything
-else* in the clip — the kind of frames a reviewer would want to eyeball for
-graphical corruption, rendering glitches, stuck animations, or UI bugs.
+GlitchVision surfaces the frames and intervals of a capture that look
+suspicious — either relative to the rest of the same clip, or relative
+to a known-good reference build. It is a triage aid: it tells a human
+reviewer *where to look*, not *what is broken*.
 
 ---
 
 ## Why this matters
 
-Manual QA of gameplay footage is expensive and incomplete. Human reviewers
-can't realistically watch every second of every build. Most automated QA
-tools either require labeled glitch datasets (which don't exist) or tight
-engine integration (which an intern / student team doesn't have).
+Manual QA of gameplay footage does not scale. Human reviewers can't
+realistically watch every second of every build, and most automated
+approaches either need labeled glitch data (which is scarce) or tight
+engine integration (which an external team does not have).
 
-An unsupervised pipeline gives you a **useful middle ground**:
+GlitchVision offers a practical middle ground:
 
-- **Game QA** — surface the 10 weirdest frames in a 15-minute playtest
-  recording for a human to look at.
-- **Simulation & robotics** — flag unusual sensor/visualization frames
-  without pre-defining failure modes.
-- **AR/VR content review** — catch rendering hiccups in long capture sessions.
-- **General anomaly monitoring** — any workflow where "this frame doesn't
+- **Build-over-build QA.** Capture reference footage from the last
+  known-good build, then flag frames and segments of a new build that
+  drift away from it.
+- **Simulation / capture review.** Surface unusual frames in long
+  capture sessions without pre-defining failure modes.
+- **General visual anomaly triage.** Anywhere "this frame doesn't
   belong" is a useful signal.
-
-The tool doesn't tell you *what* a glitch is; it tells you *where to look*.
 
 ---
 
 ## Architecture
 
+Three scoring modes are exposed behind one pipeline API:
+
+1. **Within-clip (Isolation Forest).** Flags frames that are
+   statistically unusual inside the same clip. No reference needed.
+2. **Reference distance (kNN).** Per-frame anomaly score is the mean
+   cosine distance to the `k` nearest neighbors in a precomputed
+   reference embedding bank.
+3. **Hybrid.** Min-max normalizes each of the two scores above and
+   blends them with configurable weights (default `0.5 / 0.5`).
+
+On top of any mode, per-frame scores are aggregated into
+**non-overlapping segments** so reviewers can jump directly to
+suspicious intervals instead of scrubbing a timeline.
+
 ```
-+----------------------+     +----------------------+     +-------------------------+
-|   YouTube URL        |     |   Local video upload |     |   Streamlit UI controls |
-|   (primary path)     |     |   (fallback path)    |     |   interval / K / etc.   |
-+----------+-----------+     +----------+-----------+     +-------------+-----------+
-           |                            |                               |
-           v                            v                               |
-+------------------------+   +------------------------+                 |
-| yt-dlp resolves a      |   | temp file written to   |                 |
-| progressive MP4 stream |   | the OS temp dir        |                 |
-+-----------+------------+   +-----------+------------+                 |
-            \                           /                               |
-             \                         /                                |
-              v                       v                                 |
-          +----------------------------------+                          |
-          | OpenCV VideoCapture              |                          |
-          | sample 1 frame/sec, resize 224px | <------------------------+
-          +------------------+---------------+
-                             |
-                             v
-          +----------------------------------+
-          | ResNet-18 (torchvision, eval()) |
-          | strip FC head -> 512-D vector   |
-          +------------------+---------------+
-                             |
-                             v
-          +----------------------------------+
-          | IsolationForest (scikit-learn)   |
-          | fit on embeddings, score each    |
-          +------------------+---------------+
-                             |
-                             v
-          +----------------------------------+
-          | rank top-K, smooth, save outputs |
-          |   - anomalies.csv                |
-          |   - frames/rank01_*.jpg          |
-          |   - score_plot.png               |
-          +----------------------------------+
+       Reference videos                     Candidate video
+              |                                    |
+              v                                    v
+      +-----------------+                 +-----------------+
+      | FrameExtractor  |                 | FrameExtractor  |
+      | (1 fps, 224x224)|                 | (1 fps, 224x224)|
+      +--------+--------+                 +--------+--------+
+               |                                   |
+               v                                   v
+      +-----------------+                 +-----------------+
+      | Backbone        |                 | Backbone        |
+      | (ResNet-18 /    |                 | (same backbone) |
+      |  DINO / CLIP)   |                 |                 |
+      +--------+--------+                 +--------+--------+
+               |                                   |
+               v                                   |
+      +-----------------+                          |
+      |  ReferenceBank  |                          |
+      |  embeddings.npz |                          |
+      |  metadata.json  |                          |
+      +--------+--------+                          |
+               |                                   |
+               +-----------------+-----------------+
+                                 |
+              +------------------+------------------+
+              |                  |                  |
+              v                  v                  v
+      +---------------+  +-----------------+  +---------------+
+      | Within-clip   |  | Reference kNN   |  | Hybrid blend  |
+      | Isolation F.  |  | cosine / L2     |  | normalized    |
+      +-------+-------+  +--------+--------+  +-------+-------+
+              |                   |                   |
+              +---------+---------+---------+---------+
+                        |                   |
+                        v                   v
+              +-----------------+  +-----------------+
+              | Top-K frames    |  | Top segments    |
+              +--------+--------+  +--------+--------+
+                       \                   /
+                        \                 /
+                         v               v
+                  +--------------------------+
+                  | anomalies.csv           |
+                  | segments.csv            |
+                  | score_plot.png          |
+                  | report.md               |
+                  | frames/rank*.jpg        |
+                  +--------------------------+
 ```
 
-See `src/pipeline/pipeline.py` for the orchestration code.
+Pipeline orchestration lives in `src/pipeline/pipeline.py`.
 
 ---
 
@@ -82,47 +107,75 @@ See `src/pipeline/pipeline.py` for the orchestration code.
 ```
 glitchvision/
 ├── app/
-│   ├── main.py          # Streamlit UI
+│   ├── main.py                 # Streamlit UI (mode selector + ref bank mgmt)
 │   └── config.py
 ├── src/
-│   ├── ingestion/       # YouTube stream + local upload
-│   ├── processing/      # frame sampling
-│   ├── features/        # ResNet-18 embedding extractor
-│   ├── models/          # Isolation Forest wrapper
-│   ├── pipeline/        # end-to-end orchestration
-│   └── utils/           # IO, scoring, visualization
-├── tests/
-│   ├── test_utils.py    # unit tests
-│   └── test_smoke.py    # end-to-end synthetic-video test
+│   ├── ingestion/              # YouTube stream resolution + local upload
+│   ├── processing/             # frame sampling
+│   ├── features/               # pluggable backbone (resnet18 / dino / clip)
+│   ├── models/
+│   │   ├── anomaly_detector.py # Isolation Forest wrapper
+│   │   ├── reference_scorer.py # kNN distance to reference bank
+│   │   └── hybrid_scorer.py    # normalized blend
+│   ├── reference/              # durable reference embedding bank
+│   ├── reporting/              # markdown run report
+│   ├── benchmark/              # synthetic glitch injection + metrics
+│   ├── pipeline/               # end-to-end orchestration
+│   └── utils/                  # IO, scoring, segments, visualization
+├── tests/                      # unit + end-to-end tests
 ├── data/
-│   ├── samples/         # (empty; for your local test clips)
-│   └── outputs/         # per-run output folders live here
+│   ├── samples/                # your own clips (gitignored)
+│   ├── reference_banks/        # saved banks (gitignored)
+│   └── outputs/                # per-run outputs (gitignored)
+├── .github/workflows/ci.yml
 ├── requirements.txt
-├── run_app.py           # one-liner launcher
+├── run_app.py                  # one-liner launcher
 └── README.md
 ```
 
 ---
 
+## Tech stack
+
+- **Python** 3.11+ (tested through 3.14)
+- **PyTorch / torchvision** (CPU build) — ResNet-18 backbone
+- **scikit-learn** — Isolation Forest
+- **OpenCV** — frame sampling + resize
+- **NumPy** — embedding math, kNN distances, score normalization
+- **Streamlit** — demo UI
+- **yt-dlp** — YouTube stream resolution
+- **matplotlib** — score-vs-time plot
+- **pytest** — unit + end-to-end test suite
+- **GitHub Actions** — CI for the lightweight unit tests
+
+---
+
 ## Setup
 
-Tested target: **Windows 10/11, Python 3.14, CPU only, 8 GB RAM.**
+Tested target: **Windows 10/11, macOS, Linux; Python 3.11–3.14; CPU
+only; 8 GB RAM.**
 
 ```powershell
 # 1. Create a virtual environment
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1     # (Windows PowerShell)
+# source .venv/bin/activate      # (macOS/Linux)
 
-# 2. Install PyTorch CPU build from the official index (Windows-friendly)
+# 2. Install PyTorch CPU build
 pip install torch torchvision
 
 # 3. Install the rest
 pip install -r requirements.txt
 ```
 
-macOS / Linux are equivalent (use `source .venv/bin/activate`). The
-PyTorch step can also be run without the custom index on Linux/macOS — the
-CPU wheels are the default there.
+The default path only needs the dependencies in `requirements.txt`.
+Optional alternate backbones are not required:
+
+- `dino` loads `dino_vits16` via `torch.hub` (internet on first load).
+- `clip` requires `pip install git+https://github.com/openai/CLIP.git`.
+
+If an optional backbone fails to load, the app logs a warning and
+falls back to ResNet-18 automatically.
 
 ---
 
@@ -132,98 +185,195 @@ CPU wheels are the default there.
 python run_app.py
 ```
 
-This opens the Streamlit UI in your browser. From there:
+The Streamlit UI opens in your browser.
 
-1. Choose **YouTube URL** (primary) or **Local upload (fallback)** in the
-   sidebar.
-2. Adjust frame interval, top-K, contamination, and max frames.
-3. Click **Run anomaly detection**.
-4. Review the top-K anomaly gallery, score plot, and full CSV.
-5. Download `anomalies.csv` or open the timestamped folder under
-   `data/outputs/` for raw artifacts.
+1. Pick a **Scoring mode**:
+   - *Within-clip (baseline)* — no reference needed.
+   - *Reference distance* — requires a saved reference bank.
+   - *Hybrid* — requires a saved reference bank.
+2. Pick an **Input source**:
+   - *YouTube URL* (primary) — resolved via `yt-dlp`; the source video
+     is never persisted to disk.
+   - *Local upload (fallback)* — for offline use or when a YouTube
+     stream is not OpenCV-compatible.
+3. For reference / hybrid modes, either **load an existing bank** from
+   the dropdown or expand **Build a new reference bank** and upload
+   one or more known-good clips.
+4. Tune frame interval, top-K, contamination, segment window, etc.
+5. Click **Run anomaly detection**.
+6. Review the score plot, top anomalous frames, and top segments
+   in-page. Use the **Download** buttons to save individual artifacts
+   to your machine — nothing is downloaded automatically.
 
-### Example usage (local file)
+### Build a reference bank programmatically
 
-```powershell
-# drop a clip into data/samples/ then use Local upload in the UI,
-# or call the pipeline directly:
-python -c "from src.pipeline import GlitchVisionPipeline, PipelineConfig; \
-r = GlitchVisionPipeline(PipelineConfig(interval_sec=1.0, top_k=10)) \
-.run('data/samples/your_clip.mp4', 'local_upload', 'your_clip.mp4'); \
-print(r.run_dir)"
+```python
+from src.pipeline import GlitchVisionPipeline, PipelineConfig
+
+pipe = GlitchVisionPipeline(PipelineConfig(interval_sec=1.0, backbone="resnet18"))
+bank = pipe.build_reference(
+    [("data/samples/known_good_run1.mp4", "known_good_run1"),
+     ("data/samples/known_good_run2.mp4", "known_good_run2")],
+    out_dir="data/reference_banks/known_good_v1",
+)
+print("Bank size:", bank.size)
 ```
 
-### Run tests
+### Run a candidate clip in reference mode
+
+```python
+from src.pipeline import GlitchVisionPipeline, PipelineConfig
+from src.reference import ReferenceBank
+
+bank = ReferenceBank.load("data/reference_banks/known_good_v1")
+pipe = GlitchVisionPipeline(PipelineConfig(
+    interval_sec=1.0,
+    mode="reference_distance",
+    top_k=12,
+    reference_k=5,
+))
+result = pipe.run(
+    video_source="data/samples/candidate_build.mp4",
+    source_type="local_upload",
+    source_label="candidate_build.mp4",
+    reference_bank=bank,
+)
+print("Run dir:", result.run_dir)
+```
+
+### Run the synthetic benchmark
+
+The benchmark utilities let you sanity-check the pipeline on known
+corrupted intervals. Ground truth is the injection schedule itself.
+
+```python
+from src.benchmark import plan_glitch_schedule, inject_glitches, evaluate_run
+
+# `clean_frames` is a list of BGR uint8 frames sampled from a clean clip.
+schedule = plan_glitch_schedule(n_frames=len(clean_frames), n_intervals=3, seed=0)
+corrupted, intervals = inject_glitches(clean_frames, schedule, seed=0)
+
+# Write `corrupted` to a file and run the pipeline on it, then:
+metrics = evaluate_run(
+    top_frame_indices=[r.frame_index for r in result.top_records],
+    ground_truth=intervals,
+    n_sampled_frames=result.total_sampled_frames,
+    top_segment_ranges=[(s.start_frame, s.end_frame) for s in result.top_segments],
+)
+print(metrics)
+```
+
+Benchmark numbers are only meaningful relative to a specific clip,
+schedule, and seed, so the utilities are shipped without canned scores.
+
+---
+
+## Output artifacts
+
+Each run creates a timestamped folder under `data/outputs/run_<ts>/`:
+
+| File | Description |
+| --- | --- |
+| `anomalies.csv`    | Per-sampled-frame scores (rank, timestamp, raw + normalized scores, within/reference components, mode). |
+| `segments.csv`     | Top anomalous segments with start/end time and representative frame. |
+| `score_plot.png`   | Score-vs-time curve with top-K frames highlighted. |
+| `report.md`        | Human-readable run summary (config, top frames, top segments, limitations). |
+| `frames/rank*.jpg` | Thumbnail JPEGs of the top-K anomalous frames. |
+
+Reference banks live under `data/reference_banks/<name>/` as
+`embeddings.npz` + `metadata.json`.
+
+Run outputs, sample clips, and reference banks are all **gitignored** —
+they are user-specific and regenerated per run.
+
+---
+
+## Run tests
 
 ```powershell
 pytest -q
 ```
 
-The smoke test generates a tiny synthetic MP4, runs the full pipeline on it,
-and checks that CSV + top-anomaly JPEGs are written correctly.
+The suite covers:
+
+- scoring and I/O utilities,
+- reference-bank save/load round-trip,
+- kNN reference scorer,
+- hybrid blend math,
+- segment aggregation,
+- synthetic glitch injection and benchmark metrics,
+- report builder,
+- end-to-end run in within-clip mode,
+- end-to-end run in reference and hybrid modes on a synthetic clip.
+
+CI (`.github/workflows/ci.yml`) runs the lightweight unit tests on
+every push / PR. The heavy end-to-end tests (which pull torch and
+OpenCV) are run locally against your `.venv`.
 
 ---
 
 ## Technical design decisions
 
-- **ResNet-18 over heavier backbones.** 512-D embeddings, ~11M params,
-  runs fast on CPU. Plenty discriminative for frame-level outlier detection
-  on a laptop. No need for video-specific models for an MVP.
-- **Isolation Forest over autoencoders / one-class SVMs.** No training loop,
-  no hyperparameter grief, well-understood baseline. Fits in seconds on
-  hundreds of embeddings.
-- **YouTube ingestion via resolved stream URL, not full download.**
-  `yt-dlp` gives us a playable progressive MP4 URL; OpenCV reads frames
-  from it directly. We don't persist the source video on disk. If a given
-  YouTube format isn't OpenCV-readable, we fail loudly and point the user
-  at the local upload fallback instead of faking success.
-- **Frame interval default = 1 fps.** The right middle ground between
-  missing short anomalies and melting an 8 GB laptop. Configurable in the
-  UI.
-- **`max_frames` cap = 600.** Hard safety rail so a 2-hour video doesn't
-  eat all your RAM. Tunable in the sidebar.
-- **Higher score = more anomalous.** Scikit-learn's `score_samples` is
-  "higher = more normal"; we flip the sign so the UI reads naturally.
-- **Optional moving-average smoothing and min-gap dedup.** Cheap wins
-  against noisy adjacent duplicates in the top-K gallery. Off by default
-  isn't a thing — smoothing = 3, min_gap = 2 in the defaults.
+- **ResNet-18 default.** 512-D pooled features, ~11M params, fast on
+  CPU, robust ImageNet representation. Good enough for frame-level
+  outlier detection without a training loop.
+- **Pluggable backbone registry.** `dino` and `clip` are wired via a
+  small factory so future experimentation is easy. *No backbone is
+  trained from scratch in this project;* the optional paths use
+  pretrained checkpoints.
+- **Isolation Forest for within-clip scoring.** Unsupervised, fast on
+  CPU, one meaningful knob (`contamination`), well-understood
+  baseline.
+- **kNN for reference-distance scoring.** Real reference captures are
+  multi-modal (menus, cutscenes, combat). kNN naturally respects the
+  modes; a single-centroid model would not. Its one hyperparameter
+  (`k`) has a clear meaning.
+- **L2-normalized embeddings.** Make cosine and Euclidean distance
+  interchangeable up to a monotone transform and keep the distance
+  matrix numerically stable.
+- **Segment-level aggregation.** Reviewers care about intervals, not
+  isolated frames. Non-overlapping windows map 1:1 to segment IDs on
+  disk and avoid top-K dedup confusion.
+- **YouTube ingestion via resolved stream URL.** No persistent
+  download of the source video. If OpenCV can't open the chosen
+  format, the app fails loudly and points the user at the
+  local-upload fallback.
+- **`max_frames` safety cap.** A hard rail against runaway runs on a
+  laptop.
 
 ---
 
 ## Limitations
 
-- **Frame-level only.** The model sees each frame independently; it has no
-  notion of motion, continuity, or audio.
-- **Unsupervised means "statistically unusual," not "actually broken."** A
-  dramatic cutscene, a HUD popup, a fade-to-black — all of these can score
-  high. The tool is an *aid to human review*, not a replacement for it.
-- **False positives are expected.** Tune contamination and top-K to taste.
-- **YouTube stream compatibility varies.** Some videos only expose DASH
-  fragments that OpenCV can't open directly. When that happens the UI
-  says so and offers the local-upload path.
-- **ResNet-18 is a general-purpose backbone.** A game-specific fine-tune
-  would help — out of scope for this MVP.
-- **No GPU acceleration wired in.** Intentional: the target machine is an
-  8 GB CPU-only laptop. Moving to CUDA is mostly a one-line change
-  (`device="cuda"`) if a GPU is available.
+- **Unsupervised ≠ bug detector.** Scores are *statistical* outliers.
+  Cutscenes, menus, and fade-to-black frames can score high without
+  being bugs. Every output is a candidate for human review.
+- **Per-frame backbone.** ResNet-18 sees each frame independently;
+  true motion anomalies (stuck animations, frozen physics) need
+  temporal modeling (see roadmap).
+- **Synthetic benchmark is a proxy.** Injected glitches are not a
+  substitute for real QA data; benchmark numbers are sanity checks,
+  not production KPIs.
+- **Reference generalization is bounded.** A reference bank only
+  covers the scenes it has actually seen; genuinely new content will
+  look anomalous to the reference scorer.
+- **YouTube stream compatibility varies.** DASH-only videos still
+  require the local-upload fallback.
+- **CPU-only by default.** GPU support is a one-line change
+  (`device="cuda"`) but is not officially tested here.
 
 ---
 
-## Future roadmap
+## Roadmap
 
-- **Temporal modeling** — e.g. short-window embedding deltas, or a small
-  temporal conv over pooled features, to catch *motion* anomalies (stuck
-  animations, frozen physics) that a per-frame model misses.
-- **Better stream ingestion** — fragmented/DASH stream support via a thin
-  FFmpeg wrapper, so DASH-only YouTube videos work without local upload.
-- **Synthetic glitch benchmarking** — procedurally inject artifacts
-  (texture corruption, color shifts, missing meshes) into clean footage to
-  get a *quantitative* precision/recall number instead of a vibes check.
-- **CI / build integration** — run GlitchVision on each build's QA capture
-  and attach the top-K report to the build artifact.
-- **Game-domain fine-tune** — a light contrastive fine-tune of the
-  backbone on a few hours of "normal" footage from the target title.
+- **Temporal modeling** — short-window embedding deltas or a small
+  temporal head to catch motion-related regressions.
+- **Better stream ingestion** — thin FFmpeg wrapper for DASH streams.
+- **Segment-level contact sheets** — one image per top segment for
+  faster human triage.
+- **Reference bank curation** — filtering and deduplication so banks
+  stay compact as more known-good captures accumulate.
+- **Optional fine-tune hook** — a light contrastive head on top of the
+  frozen backbone, trained on domain-specific footage.
 
 ---
-
-

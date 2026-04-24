@@ -134,8 +134,16 @@ def test_pipeline_end_to_end(tmp_path: Path):
         "image_path",
         "source_type",
         "source_label",
+        "mode",
     }
     assert expected_cols.issubset(set(df.columns))
+
+    # Segment CSV + markdown report should be produced too.
+    if result.segment_csv_path is not None:
+        assert result.segment_csv_path.exists()
+    if result.report_path is not None:
+        assert result.report_path.exists()
+        assert result.report_path.read_text(encoding="utf-8").strip() != ""
 
 
 if __name__ == "__main__":
