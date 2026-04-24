@@ -8,10 +8,6 @@ gameplay videos by surfacing the frames that *look different from everything
 else* in the clip — the kind of frames a reviewer would want to eyeball for
 graphical corruption, rendering glitches, stuck animations, or UI bugs.
 
-> This is a CodePath showcase MVP. It is honest about its scope:
-> frame-level, unsupervised, CPU-only. It is not a "real-time production QA"
-> system, and it doesn't claim to be state of the art.
-
 ---
 
 ## Why this matters
@@ -110,7 +106,7 @@ glitchvision/
 
 ## Setup
 
-Tested target: **Windows 10/11, Python 3.10–3.12, CPU only, 8 GB RAM.**
+Tested target: **Windows 10/11, Python 3.14, CPU only, 8 GB RAM.**
 
 ```powershell
 # 1. Create a virtual environment
@@ -118,7 +114,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
 # 2. Install PyTorch CPU build from the official index (Windows-friendly)
-pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
+pip install torch torchvision
 
 # 3. Install the rest
 pip install -r requirements.txt
@@ -230,22 +226,4 @@ and checks that CSV + top-anomaly JPEGs are written correctly.
 
 ---
 
-## Resume bullets (honest versions)
 
-- Built **GlitchVision**, an end-to-end MVP that flags visual anomalies in
-  gameplay footage using pretrained ResNet-18 embeddings and Isolation
-  Forest, packaged behind a Streamlit UI and runnable on a CPU-only laptop.
-- Designed a streaming YouTube ingestion path (yt-dlp → OpenCV via resolved
-  MP4 URL) that analyzes videos without persisting the source file on disk.
-- Shipped the full pipeline (sampling, embedding, anomaly ranking, CSV +
-  gallery outputs, smoke tests) in under a week under a strict no-GPU,
-  minimal-dependency constraint.
-- Explicitly chose Isolation Forest over a custom deep anomaly model for
-  time, honesty, and demo reliability — documented the trade-off in the
-  README.
-
----
-
-## License
-
-MIT (or your project's default — adjust before publishing).
