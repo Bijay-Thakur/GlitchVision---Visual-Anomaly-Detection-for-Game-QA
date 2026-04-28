@@ -25,14 +25,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.config import DEFAULTS, OUTPUTS_DIR, REFERENCE_BANKS_DIR  # noqa: E402
+from app.config import (  # noqa: E402
+    DEFAULTS,
+    GAME_BENCHMARK_DIR,
+    LEGACY_REFERENCE_VIDEOS_FILE,
+    OUTPUTS_DIR,
+    REFERENCE_BANKS_DIR,
+    REFERENCE_VIDEOS_FILE,
+    REPO_ROOT,
+)
 from src.ingestion import (  # noqa: E402
     YouTubeStreamError,
+    opera_gx_profile_dir,
     resolve_youtube_stream,
     save_uploaded_file,
 )
 from src.pipeline import GlitchVisionPipeline, PipelineConfig  # noqa: E402
-from src.reference import ReferenceBank  # noqa: E402
+from src.reference import ReferenceBank, youtube_sources  # noqa: E402
+
+from app import output_view  # noqa: E402
 
 
 st.set_page_config(
@@ -61,33 +72,17 @@ st.caption(
     "ResNet-18 embeddings + Isolation Forest + optional reference baseline. "
     "CPU-first."
 )
-
-with st.expander("What is this?", expanded=False):
-    st.markdown(
-        """
-        **GlitchVision** samples frames from a video, embeds them with a
-        pretrained backbone (default ResNet-18), and surfaces suspicious
-        frames and segments using one of three modes:
-
-        - **Within-clip (Isolation Forest)** — flags frames that look
-          different from the rest of the *same* clip. Good for one-off
-          captures with no reference.
-        - **Reference distance (kNN)** — compares each candidate frame
-          to a saved "known-good" reference embedding bank. This is
-          the business path: *visual regression triage*.
-        - **Hybrid** — normalized blend of both scores, for when you
-          want novelty *and* drift detection in one pass.
-
-        This is an honest, CPU-first MVP. It surfaces suspicious moments
-        for a human to eyeball — not a drop-in bug classifier.
-        """
-    )
+st.caption(
+    "**See output** (first tab below) shows every saved artifact inline: report, tables, "
+    "plots, thumbnails, and metrics. Use **Run** to process a video."
+)
 
 
 # ---------------------------------------------------------------------
-# Sidebar: tabs for Run / Reference / Benchmark
+# Sidebar
 # ---------------------------------------------------------------------
 st.sidebar.header("Run controls")
+st.sidebar.caption("After a run, open the **See output** tab for full results.")
 
 mode_label_to_id = {
     "Within-clip (baseline)": "within_clip_iforest",
@@ -108,6 +103,86 @@ input_mode = st.sidebar.radio(
     index=0,
     help="YouTube is the primary path. Local upload is a reliable fallback.",
 )
+
+with st.sidebar.expander("YouTube cookies (anti-bot)", expanded=False):
+    st.caption(
+        "Use this when YouTube returns **Sign in to confirm you're not a bot**. "
+        "A real **Netscape `cookies.txt` file** is the most reliable on Windows."
+    )
+    if sys.platform == "win32":
+        st.warning(
+            "On **Windows**, **Chrome**, **Edge**, **Brave**, and **Opera GX** use "
+            "Chromium-style cookie encryption and may hit **Failed to decrypt with DPAPI** "
+            "when yt-dlp reads them. **Most reliable:** export **`cookies.txt`** (link below). "
+            "**Often works without DPAPI issues:** **Firefox**. **Opera GX:** pick "
+            "**opera gx** below (not plain **opera**) so we point at the GX profile folder."
+        )
+    st.markdown(
+        "[Export YouTube cookies for yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)"
+    )
+    youtube_cookies_path = st.text_input(
+        "Path to cookies.txt (recommended on Windows)",
+        value="",
+        placeholder=r"e.g. C:\Users\YourName\Downloads\youtube-cookies.txt",
+        key="gv_yt_cookie_path",
+        help="Must be a real path to an exported Netscape cookies file. "
+        "If this file is missing, the path is ignored and yt-dlp uses the browser option below.",
+    )
+    _p_raw = (youtube_cookies_path or "").strip()
+    if _p_raw and not Path(_p_raw).is_file():
+        st.error(
+            f"**File not found:** `{_p_raw}` — fix the path, or clear the field. "
+            "Until the file exists, only the **browser** option below is used."
+        )
+    yt_browser_pick = st.selectbox(
+        "Or read cookies from browser",
+        [
+            "— none —",
+            "firefox",
+            "opera gx",
+            "opera (stable)",
+            "edge",
+            "chrome",
+            "brave",
+        ],
+        index=0,
+        key="gv_yt_browser",
+        help="**Edge** uses your Gmail login but can still fail with DPAPI on Windows. "
+        "For **Opera GX**, choose **opera gx**. "
+        "**Important:** quit the browser completely before resolve — yt-dlp copies the "
+        "cookie DB; if the browser is open you may get *Could not copy … cookie database*. "
+        "Check Task Manager for stray processes, or use **cookies.txt** only (browser = — none —).",
+    )
+    if yt_browser_pick == "opera gx":
+        _gx = opera_gx_profile_dir()
+        if _gx is None:
+            st.error(
+                "**Opera GX profile not found.** Install/sign in to Opera GX first, or set "
+                "environment variable **GLITCHVISION_OPERA_GX_USER_DATA** to your GX "
+                "user-data folder (usually contains `Local State`)."
+            )
+        else:
+            st.caption(
+                f"GX folder: `{_gx}`. **Quit Opera GX fully** (including systray/background). "
+                "If you still see *Could not copy cookie database*, open **Task Manager** → "
+                "end all **Opera** tasks, then retry — or use **`cookies.txt`** with browser "
+                "set to **— none —**."
+            )
+    elif yt_browser_pick == "edge" and sys.platform == "win32":
+        st.caption(
+            "**Edge** often triggers the same **DPAPI** error as Chrome. If it does, use "
+            "**cookies.txt** or **Firefox** for YouTube."
+        )
+_browser_internal = {
+    "— none —": None,
+    "firefox": "firefox",
+    "opera gx": "opera_gx",
+    "opera (stable)": "opera",
+    "edge": "edge",
+    "chrome": "chrome",
+    "brave": "brave",
+}
+youtube_cookies_browser: str | None = _browser_internal.get(yt_browser_pick or "")
 
 backbone = st.sidebar.selectbox(
     "Backbone",
@@ -149,6 +224,16 @@ max_frames = st.sidebar.slider(
     value=int(DEFAULTS.max_frames),
     step=60,
 )
+
+video_portion_pct = st.sidebar.radio(
+    "Video portion to analyze",
+    options=[25, 50, 100],
+    index=2,
+    horizontal=True,
+    help="Uses the first N%% of the clip when OpenCV knows duration (typical for local files). "
+    "Many streams report unknown length — the full stream is used.",
+)
+duration_fraction = float(video_portion_pct) / 100.0
 
 smoothing = st.sidebar.slider(
     "Temporal smoothing window",
@@ -203,345 +288,466 @@ else:
 
 
 # ---------------------------------------------------------------------
-# Reference bank management
-# ---------------------------------------------------------------------
-REFERENCE_BANKS_DIR.mkdir(parents=True, exist_ok=True)
+tab_see, tab_run = st.tabs(["See output", "Run"])
 
-
-def _list_reference_banks() -> list[Path]:
-    if not REFERENCE_BANKS_DIR.exists():
-        return []
-    return sorted(
-        [p for p in REFERENCE_BANKS_DIR.iterdir() if p.is_dir()],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+with tab_see:
+    output_view.render_see_output_tab(
+        OUTPUTS_DIR,
+        GAME_BENCHMARK_DIR,
+        preferred_run_name=st.session_state.get("gv_last_run_name"),
     )
 
+with tab_run:
+    with st.expander("What is this?", expanded=False):
+        st.markdown(
+            """
+            **GlitchVision** samples frames from a video, embeds them with a
+            pretrained backbone (default ResNet-18), and surfaces suspicious
+            frames and segments using one of three modes:
 
-selected_bank: Optional[ReferenceBank] = None
-selected_bank_path: Optional[Path] = None
+            - **Within-clip (Isolation Forest)** — flags frames that look
+              different from the rest of the *same* clip. Good for one-off
+              captures with no reference.
+            - **Reference distance (kNN)** — compares each candidate frame
+              to a saved "known-good" reference embedding bank. This is
+              the business path: *visual regression triage*.
+            - **Hybrid** — normalized blend of both scores, for when you
+              want novelty *and* drift detection in one pass.
 
-if mode_id in {"reference_distance", "hybrid"}:
-    st.subheader("Reference bank")
-
-    banks = _list_reference_banks()
-    bank_names = [b.name for b in banks]
-
-    if bank_names:
-        choice = st.selectbox(
-            "Load an existing reference bank",
-            options=["<none>"] + bank_names,
-            index=0,
-        )
-        if choice != "<none>":
-            selected_bank_path = REFERENCE_BANKS_DIR / choice
-            try:
-                selected_bank = ReferenceBank.load(selected_bank_path)
-                st.caption(
-                    f"Loaded `{choice}` · {selected_bank.size} frames · "
-                    f"backbone = `{selected_bank.backbone}`"
-                )
-            except Exception as exc:
-                st.error(f"Could not load reference bank: {exc}")
-    else:
-        st.info(
-            "No reference banks saved yet. Use the builder below to create one."
+            This is an honest, CPU-first MVP. It surfaces suspicious moments
+            for a human to eyeball — not a drop-in bug classifier.
+            """
         )
 
-    with st.expander("Build a new reference bank", expanded=(not bank_names)):
-        bank_name = st.text_input(
-            "Name for the new bank",
-            value="known_good_v1",
-            help="Stored under `data/reference_banks/<name>/`.",
-        )
-        ref_upload = st.file_uploader(
-            "Upload one or more known-good reference videos",
-            type=["mp4", "mov", "mkv", "webm", "avi", "m4v"],
-            accept_multiple_files=True,
-            key="ref_upload",
-        )
-        build_clicked = st.button("Build reference bank", type="secondary")
+    # Reference bank management
+    # ---------------------------------------------------------------------
+    REFERENCE_BANKS_DIR.mkdir(parents=True, exist_ok=True)
 
-        if build_clicked:
-            if not ref_upload:
-                st.warning("Please upload at least one reference video.")
-            elif not bank_name.strip():
-                st.warning("Please name the bank.")
-            else:
-                pipeline_for_ref = get_pipeline(backbone)
-                pipeline_for_ref.config = PipelineConfig(
-                    interval_sec=float(frame_interval),
-                    image_size=int(DEFAULTS.image_size),
-                    max_frames=int(max_frames),
-                    backbone=backbone,
-                )
-                cleanups = []
-                sources = []
-                for up in ref_upload:
-                    lv = save_uploaded_file(up, original_name=up.name)
-                    cleanups.append(lv.cleanup)
-                    sources.append((str(lv.path), up.name))
 
-                progress_bar = st.progress(0.0, text="Building bank…")
+    def _effective_reference_urls_file() -> Path:
+        """Prefer ``data/reference_videos.txt``, then legacy ``reference_banks/…``."""
+        if REFERENCE_VIDEOS_FILE.exists():
+            return REFERENCE_VIDEOS_FILE
+        if LEGACY_REFERENCE_VIDEOS_FILE.exists():
+            return LEGACY_REFERENCE_VIDEOS_FILE
+        return REFERENCE_VIDEOS_FILE
+
+
+    def _parse_non_comment_urls(path: Path) -> list[str]:
+        if not path.exists():
+            return []
+        urls: list[str] = []
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            urls.append(line)
+        return urls
+
+
+    def _list_reference_banks() -> list[Path]:
+        if not REFERENCE_BANKS_DIR.exists():
+            return []
+        valid = []
+        for p in REFERENCE_BANKS_DIR.iterdir():
+            if not p.is_dir():
+                continue
+            if (p / "embeddings.npz").exists() and (p / "metadata.json").exists():
+                valid.append(p)
+        return sorted(valid, key=lambda x: x.stat().st_mtime, reverse=True)
+
+
+    selected_bank: Optional[ReferenceBank] = None
+    selected_bank_path: Optional[Path] = None
+
+    if mode_id in {"reference_distance", "hybrid"}:
+        st.subheader("Reference bank")
+
+        if "ref_bank_built_notice" in st.session_state:
+            st.success(st.session_state.pop("ref_bank_built_notice"))
+
+        banks = _list_reference_banks()
+        bank_names = [b.name for b in banks]
+
+        if bank_names:
+            choice = st.selectbox(
+                "Load an existing reference bank",
+                options=["<none>"] + bank_names,
+                index=0,
+            )
+            if choice != "<none>":
+                selected_bank_path = REFERENCE_BANKS_DIR / choice
                 try:
-                    bank = pipeline_for_ref.build_reference(
-                        sources,
-                        out_dir=REFERENCE_BANKS_DIR / bank_name.strip(),
-                        progress=lambda p, m: progress_bar.progress(
-                            min(max(p, 0.0), 1.0), text=m
-                        ),
-                    )
-                    st.success(
-                        f"Saved reference bank '{bank_name}' with "
-                        f"{bank.size} frames."
+                    selected_bank = ReferenceBank.load(selected_bank_path)
+                    st.caption(
+                        f"Loaded `{choice}` · {selected_bank.size} frames · "
+                        f"backbone = `{selected_bank.backbone}`"
                     )
                 except Exception as exc:
-                    st.error(f"Reference bank build failed: {exc}")
-                finally:
-                    progress_bar.empty()
-                    for c in cleanups:
-                        try:
-                            c()
-                        except Exception:
-                            pass
-
-
-# ---------------------------------------------------------------------
-# Input widgets
-# ---------------------------------------------------------------------
-youtube_url: str = ""
-uploaded = None
-
-if input_mode == "YouTube URL":
-    youtube_url = st.text_input(
-        "YouTube URL",
-        placeholder="https://www.youtube.com/watch?v=…",
-        help="We resolve a playable stream via yt-dlp. The full source video "
-        "is NOT saved to disk.",
-    )
-else:
-    uploaded = st.file_uploader(
-        "Upload a candidate video",
-        type=["mp4", "mov", "mkv", "webm", "avi", "m4v"],
-        accept_multiple_files=False,
-        key="candidate_upload",
-    )
-    st.caption(
-        "Uploaded files are written to a temp location for OpenCV, then "
-        "cleaned up after the run."
-    )
-
-run_clicked = st.button(
-    "Run anomaly detection",
-    type="primary",
-    use_container_width=True,
-)
-
-
-# ---------------------------------------------------------------------
-# Execution
-# ---------------------------------------------------------------------
-def _prepare_source() -> Optional[dict]:
-    """Resolve the chosen input into a (source, type, label) dict."""
-    if input_mode == "YouTube URL":
-        url = (youtube_url or "").strip()
-        if not url:
-            st.warning("Please paste a YouTube URL first.")
-            return None
-
-        try:
-            with st.spinner("Resolving YouTube stream via yt-dlp…"):
-                resolved = resolve_youtube_stream(url)
-        except YouTubeStreamError as exc:
-            st.error(
-                f"Could not resolve a readable stream: {exc}\n\n"
-                "Please switch to **Local upload (fallback)** in the sidebar."
+                    st.error(f"Could not load reference bank: {exc}")
+        else:
+            st.info(
+                "No reference banks are on disk yet. "
+                "Expand **Build a new reference bank** and use **From YouTube URL list** "
+                "(not a local upload unless you have files)."
             )
+
+        ref_url_path = _effective_reference_urls_file()
+        url_list = _parse_non_comment_urls(ref_url_path)
+        try:
+            url_display = ref_url_path.relative_to(REPO_ROOT)
+        except ValueError:
+            url_display = ref_url_path
+
+        with st.expander("Build a new reference bank", expanded=(not bank_names)):
+            bank_name = st.text_input(
+                "Name for the new bank",
+                value="known_good_v1",
+                help="Stored under `data/reference_banks/<name>/`.",
+            )
+            tab_urls, tab_upload = st.tabs(
+                ["From YouTube URL list (recommended)", "From file upload"]
+            )
+
+            with tab_urls:
+                if not ref_url_path.exists():
+                    st.caption(
+                        f"Create `{url_display}` in the repo (one YouTube URL per line). "
+                        "Lines starting with `#` are ignored."
+                    )
+                else:
+                    st.caption(
+                        f"Reads **`{url_display}`** — **{len(url_list)}** URL(s). "
+                        "Resolves each with yt-dlp and samples frames like uploads."
+                    )
+                build_from_urls_clicked = st.button(
+                    "Build bank from URL list file",
+                    type="primary",
+                    disabled=not url_list,
+                    key="build_from_urls",
+                    help="Uses every line in the file; failed URLs are skipped with a warning.",
+                )
+
+                if build_from_urls_clicked:
+                    if not bank_name.strip():
+                        st.warning("Please name the bank.")
+                    else:
+                        pipeline_for_ref = get_pipeline(backbone)
+                        pipeline_for_ref.config = PipelineConfig(
+                            interval_sec=float(frame_interval),
+                            image_size=int(DEFAULTS.image_size),
+                            max_frames=int(max_frames),
+                            backbone=backbone,
+                            duration_fraction=float(duration_fraction),
+                        )
+                        progress_bar = st.progress(0.0, text="Resolving reference URLs…")
+
+                        def _on_resolve(cur: int, tot: int) -> None:
+                            progress_bar.progress(
+                                min(cur / max(1, tot), 0.99),
+                                text=f"Resolving URL {cur}/{tot}…",
+                            )
+
+                        try:
+                            ca = _youtube_cookie_args()
+                            sources, resolve_errors = youtube_sources.page_urls_to_stream_sources(
+                                url_list,
+                                on_progress=_on_resolve,
+                                cookies_file=ca.get("cookies_file"),
+                                cookies_from_browser=ca.get("cookies_from_browser"),
+                            )
+                            if resolve_errors:
+                                st.warning(
+                                    "Some URLs could not be resolved (others are still used):\n\n"
+                                    + "\n".join(resolve_errors)
+                                )
+                            if not sources:
+                                st.error(
+                                    "No URLs could be opened. Fix errors above or check the list file."
+                                )
+                            else:
+                                progress_bar.progress(0.0, text="Building embedding bank…")
+                                try:
+                                    bank = pipeline_for_ref.build_reference(
+                                        sources,
+                                        out_dir=REFERENCE_BANKS_DIR / bank_name.strip(),
+                                        progress=lambda p, m: progress_bar.progress(
+                                            min(max(p, 0.0), 1.0), text=m
+                                        ),
+                                        notes=(
+                                            f"from {url_display}; "
+                                            f"{len(sources)}/{len(url_list)} URLs OK"
+                                        ),
+                                    )
+                                    st.session_state["ref_bank_built_notice"] = (
+                                        f"Saved **{bank_name.strip()}** — {bank.size} frames "
+                                        f"from {len(sources)} video(s). Select it above."
+                                    )
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Reference bank build failed: {exc}")
+                        finally:
+                            progress_bar.empty()
+
+            with tab_upload:
+                ref_upload = st.file_uploader(
+                    "Upload one or more known-good reference videos",
+                    type=["mp4", "mov", "mkv", "webm", "avi", "m4v"],
+                    accept_multiple_files=True,
+                    key="ref_upload",
+                )
+                build_clicked = st.button(
+                    "Build from uploaded files",
+                    type="secondary",
+                    key="build_from_upload",
+                )
+
+                if build_clicked:
+                    if not ref_upload:
+                        st.warning("Please upload at least one reference video.")
+                    elif not bank_name.strip():
+                        st.warning("Please name the bank.")
+                    else:
+                        pipeline_for_ref = get_pipeline(backbone)
+                        pipeline_for_ref.config = PipelineConfig(
+                            interval_sec=float(frame_interval),
+                            image_size=int(DEFAULTS.image_size),
+                            max_frames=int(max_frames),
+                            backbone=backbone,
+                            duration_fraction=float(duration_fraction),
+                        )
+                        cleanups = []
+                        sources: list[tuple[str, str]] = []
+                        for up in ref_upload:
+                            lv = save_uploaded_file(up, original_name=up.name)
+                            cleanups.append(lv.cleanup)
+                            sources.append((str(lv.path), up.name))
+
+                        progress_bar = st.progress(0.0, text="Building bank…")
+                        try:
+                            bank = pipeline_for_ref.build_reference(
+                                sources,
+                                out_dir=REFERENCE_BANKS_DIR / bank_name.strip(),
+                                progress=lambda p, m: progress_bar.progress(
+                                    min(max(p, 0.0), 1.0), text=m
+                                ),
+                            )
+                            st.session_state["ref_bank_built_notice"] = (
+                                f"Saved **{bank_name.strip()}** — {bank.size} frames. "
+                                "Select it above."
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Reference bank build failed: {exc}")
+                        finally:
+                            progress_bar.empty()
+                            for c in cleanups:
+                                try:
+                                    c()
+                                except Exception:
+                                    pass
+
+
+    # ---------------------------------------------------------------------
+    # Input widgets
+    # ---------------------------------------------------------------------
+    def _youtube_cookie_args() -> dict:
+        """Arguments for :func:`~src.ingestion.youtube_stream.resolve_youtube_stream`."""
+        raw = (youtube_cookies_path or "").strip()
+        cf: Path | None = Path(raw) if raw else None
+        if cf is not None and not cf.is_file():
+            cf = None
+        out: dict = {}
+        if cf is not None:
+            out["cookies_file"] = cf
+        if youtube_cookies_browser:
+            out["cookies_from_browser"] = youtube_cookies_browser
+        return out
+
+
+    youtube_url: str = ""
+    uploaded = None
+
+    if input_mode == "YouTube URL":
+        youtube_url = st.text_input(
+            "YouTube URL",
+            placeholder="https://www.youtube.com/watch?v=…",
+            help="We resolve a playable stream via yt-dlp. The full source video "
+            "is NOT saved to disk.",
+        )
+    else:
+        uploaded = st.file_uploader(
+            "Upload a candidate video",
+            type=["mp4", "mov", "mkv", "webm", "avi", "m4v"],
+            accept_multiple_files=False,
+            key="candidate_upload",
+        )
+        st.caption(
+            "Uploaded files are written to a temp location for OpenCV, then "
+            "cleaned up after the run."
+        )
+
+    run_clicked = st.button(
+        "Run anomaly detection",
+        type="primary",
+        use_container_width=True,
+    )
+
+
+    # ---------------------------------------------------------------------
+    # Execution
+    # ---------------------------------------------------------------------
+    def _prepare_source() -> Optional[dict]:
+        """Resolve the chosen input into a (source, type, label) dict."""
+        if input_mode == "YouTube URL":
+            url = (youtube_url or "").strip()
+            if not url:
+                st.warning("Please paste a YouTube URL first.")
+                return None
+
+            try:
+                with st.spinner("Resolving YouTube stream via yt-dlp…"):
+                    resolved = resolve_youtube_stream(url, **_youtube_cookie_args())
+            except YouTubeStreamError as exc:
+                err_low = str(exc).lower()
+                cookie_hint = ""
+                if "dpapi" in err_low or ("decrypt" in err_low and "cookie" in err_low):
+                    cookie_hint = (
+                        "\n\n**DPAPI (Windows + Chrome/Edge):** yt-dlp often cannot read "
+                        "those browser cookies. Set **Or read cookies from browser** to "
+                        "**— none —**, export **`cookies.txt`** while logged into YouTube "
+                        "(sidebar link), and paste the **full path** to that file. Or use "
+                        "**Firefox** for YouTube and pick **firefox** here. "
+                        "[Details](https://github.com/yt-dlp/yt-dlp/issues/10927)"
+                    )
+                elif "could not copy" in err_low and "cookie" in err_low:
+                    cookie_hint = (
+                        "\n\n**Cookie database is locked:** yt-dlp must **copy** your "
+                        "browser’s cookie file. **Fully quit** the browser (Opera GX, Chrome, "
+                        "Edge, etc.) — check **Task Manager** for leftover **Opera** / "
+                        "**opera** processes and **End task**. Then run again. "
+                        "Or avoid the lock entirely: export **`cookies.txt`**, set "
+                        "**— none —** for browser, paste only the file path. "
+                        "[yt-dlp #7271](https://github.com/yt-dlp/yt-dlp/issues/7271)"
+                    )
+                elif any(
+                    x in err_low
+                    for x in ("sign in", "not a bot", "bot", "cookie", "authentication")
+                ):
+                    cookie_hint = (
+                        "\n\n**If YouTube blocked the request:** open **YouTube cookies (anti-bot)** "
+                        "in the sidebar and add a valid `cookies.txt` path or choose your browser, "
+                        "then run again. Or switch to **Local upload (fallback)**."
+                    )
+                st.error(
+                    f"Could not resolve a readable stream: {exc}{cookie_hint}"
+                )
+                return None
+
+            st.success(f"Resolved stream: **{resolved.title}**")
+            meta_cols = st.columns(4)
+            meta_cols[0].metric("Duration (s)", f"{resolved.duration_sec or 0:.0f}")
+            meta_cols[1].metric("Format", resolved.ext or "—")
+            meta_cols[2].metric("Width", resolved.width or "—")
+            meta_cols[3].metric("Height", resolved.height or "—")
+            return {
+                "source": resolved.stream_url,
+                "type": "youtube",
+                "label": resolved.title or url,
+                "cleanup": None,
+            }
+
+        if uploaded is None:
+            st.warning("Please upload a video file first.")
             return None
 
-        st.success(f"Resolved stream: **{resolved.title}**")
-        meta_cols = st.columns(4)
-        meta_cols[0].metric("Duration (s)", f"{resolved.duration_sec or 0:.0f}")
-        meta_cols[1].metric("Format", resolved.ext or "—")
-        meta_cols[2].metric("Width", resolved.width or "—")
-        meta_cols[3].metric("Height", resolved.height or "—")
+        local = save_uploaded_file(uploaded, original_name=uploaded.name)
         return {
-            "source": resolved.stream_url,
-            "type": "youtube",
-            "label": resolved.title or url,
-            "cleanup": None,
+            "source": str(local.path),
+            "type": "local_upload",
+            "label": local.display_name,
+            "cleanup": local.cleanup,
         }
 
-    if uploaded is None:
-        st.warning("Please upload a video file first.")
-        return None
 
-    local = save_uploaded_file(uploaded, original_name=uploaded.name)
-    return {
-        "source": str(local.path),
-        "type": "local_upload",
-        "label": local.display_name,
-        "cleanup": local.cleanup,
-    }
+    def _run_pipeline(source_info: dict) -> None:
+        if mode_id in {"reference_distance", "hybrid"} and selected_bank is None:
+            st.error(
+                "This scoring mode needs a reference bank. Build or load one "
+                "first, or switch to the within-clip mode."
+            )
+            return
 
-
-def _run_pipeline(source_info: dict) -> None:
-    if mode_id in {"reference_distance", "hybrid"} and selected_bank is None:
-        st.error(
-            "This scoring mode needs a reference bank. Build or load one "
-            "first, or switch to the within-clip mode."
+        cfg = PipelineConfig(
+            interval_sec=float(frame_interval),
+            top_k=int(top_k),
+            contamination=float(contamination),
+            max_frames=int(max_frames),
+            duration_fraction=float(duration_fraction),
+            smoothing_window=int(smoothing),
+            segment_window=int(segment_window),
+            segment_top_k=int(segment_top_k),
+            reference_k=int(reference_k),
+            hybrid_weight_within=float(hybrid_w_within),
+            hybrid_weight_reference=float(hybrid_w_ref),
+            backbone=backbone,
+            mode=mode_id,  # type: ignore[arg-type]
+            output_dir=OUTPUTS_DIR,
         )
-        return
+        pipeline = get_pipeline(backbone)
+        pipeline.config = cfg
 
-    cfg = PipelineConfig(
-        interval_sec=float(frame_interval),
-        top_k=int(top_k),
-        contamination=float(contamination),
-        max_frames=int(max_frames),
-        smoothing_window=int(smoothing),
-        segment_window=int(segment_window),
-        segment_top_k=int(segment_top_k),
-        reference_k=int(reference_k),
-        hybrid_weight_within=float(hybrid_w_within),
-        hybrid_weight_reference=float(hybrid_w_ref),
-        backbone=backbone,
-        mode=mode_id,  # type: ignore[arg-type]
-        output_dir=OUTPUTS_DIR,
-    )
-    pipeline = get_pipeline(backbone)
-    pipeline.config = cfg
+        progress_bar = st.progress(0.0, text="Starting…")
+        status = st.empty()
+        start = time.time()
 
-    progress_bar = st.progress(0.0, text="Starting…")
-    status = st.empty()
-    start = time.time()
+        def on_progress(p: float, msg: str) -> None:
+            progress_bar.progress(min(max(p, 0.0), 1.0), text=msg)
+            status.caption(msg)
 
-    def on_progress(p: float, msg: str) -> None:
-        progress_bar.progress(min(max(p, 0.0), 1.0), text=msg)
-        status.caption(msg)
+        try:
+            result = pipeline.run(
+                video_source=source_info["source"],
+                source_type=source_info["type"],
+                source_label=source_info["label"],
+                progress=on_progress,
+                reference_bank=selected_bank,
+            )
+        except Exception as exc:
+            st.error(f"Pipeline failed: {exc}")
+            return
+        finally:
+            cleanup = source_info.get("cleanup")
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
 
-    try:
-        result = pipeline.run(
-            video_source=source_info["source"],
-            source_type=source_info["type"],
-            source_label=source_info["label"],
-            progress=on_progress,
-            reference_bank=selected_bank,
+        elapsed = time.time() - start
+        progress_bar.empty()
+        status.empty()
+        st.session_state["gv_last_run_name"] = result.run_dir.name
+        st.success(
+            f"[{result.mode}] Analyzed {result.total_sampled_frames} frames in "
+            f"{elapsed:.1f}s → `{result.run_dir.name}`"
         )
-    except Exception as exc:
-        st.error(f"Pipeline failed: {exc}")
-        return
-    finally:
-        cleanup = source_info.get("cleanup")
-        if callable(cleanup):
-            try:
-                cleanup()
-            except Exception:
-                pass
+        st.info(
+            "Switch to the **See output** tab (first tab) for **report**, **anomalies.csv**, "
+            "**segments**, **score plot**, thumbnails, and metrics — plus CLI benchmark output if present."
+        )
 
-    elapsed = time.time() - start
-    progress_bar.empty()
-    status.empty()
-    st.success(
-        f"[{result.mode}] Analyzed {result.total_sampled_frames} frames in "
-        f"{elapsed:.1f}s."
-    )
 
-    # --- Summary ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sampled frames", result.total_sampled_frames)
-    c2.metric("Top-K returned", len(result.top_records))
-    c3.metric("Score min", f"{result.score_min:.3f}")
-    c4.metric("Score max", f"{result.score_max:.3f}")
-
-    st.markdown(f"**Output folder:** `{result.run_dir}`")
-    if result.report_path:
-        st.markdown(f"**Report:** `{result.report_path.name}`")
-
-    # --- Score plot ---
-    if result.plot_path and Path(result.plot_path).exists():
-        st.image(str(result.plot_path), caption="Anomaly score over time")
-
-    # --- Top anomalous frames ---
-    st.subheader("Top anomalous frames")
-    if not result.top_records:
-        st.info("No top frames to display.")
+    if run_clicked:
+        info = _prepare_source()
+        if info is not None:
+            _run_pipeline(info)
     else:
-        cols_per_row = 4
-        for row_start in range(0, len(result.top_records), cols_per_row):
-            row = result.top_records[row_start : row_start + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for col, rec in zip(cols, row):
-                img_full = result.run_dir / rec.image_path
-                if img_full.exists():
-                    col.image(str(img_full), use_container_width=True)
-                col.caption(
-                    f"**Rank #{rec.rank}** · t = {rec.timestamp_sec:.2f}s\n\n"
-                    f"score = {rec.anomaly_score:.3f} "
-                    f"(norm {rec.normalized_score:.2f})"
-                )
-
-    # --- Top anomalous segments ---
-    st.subheader("Top anomalous segments")
-    if not result.top_segments:
-        st.info("Segment analysis not available for this run.")
-    else:
-        seg_rows = [
-            {
-                "rank": s.rank,
-                "start (s)": round(s.start_time_sec, 2),
-                "end (s)": round(s.end_time_sec, 2),
-                "mean_score": round(s.mean_score, 4),
-                "max_score": round(s.max_score, 4),
-                "representative_frame": s.representative_frame,
-            }
-            for s in result.top_segments
-        ]
-        st.dataframe(pd.DataFrame(seg_rows), use_container_width=True, hide_index=True)
-
-    # --- Downloads ---
-    # Artifacts are persisted to the run folder on disk. Nothing is pushed
-    # to the browser automatically; the user decides what (if anything) to
-    # download by clicking a button.
-    st.subheader("Download artifacts")
-    st.caption(
-        f"All files are saved under `{result.run_dir}` on disk. "
-        "Use the buttons below to download individual artifacts."
-    )
-
-    download_targets: list[tuple[str, Path | None, str, str]] = [
-        ("anomalies.csv (per-frame scores)", result.csv_path, "anomalies.csv", "text/csv"),
-        ("segments.csv (top anomalous segments)", result.segment_csv_path, "segments.csv", "text/csv"),
-        ("report.md (run summary)", result.report_path, "report.md", "text/markdown"),
-        ("score_plot.png", result.plot_path, "score_plot.png", "image/png"),
-    ]
-
-    dl_cols = st.columns(2)
-    for i, (label, path, fname, mime) in enumerate(download_targets):
-        target_col = dl_cols[i % 2]
-        if path and Path(path).exists():
-            with open(path, "rb") as f:
-                target_col.download_button(
-                    label=f"Download {label}",
-                    data=f.read(),
-                    file_name=fname,
-                    mime=mime,
-                    use_container_width=True,
-                    key=f"dl_{fname}",
-                )
-        else:
-            target_col.caption(f"— {label} not available")
-
-
-if run_clicked:
-    info = _prepare_source()
-    if info is not None:
-        _run_pipeline(info)
-else:
-    st.info(
-        "Pick a scoring mode, choose an input source, set your parameters, "
-        "then click **Run anomaly detection**. Outputs are saved under "
-        "`data/outputs/`."
-    )
+        st.info(
+            "Pick a scoring mode, choose an input source, set your parameters, "
+            "then click **Run anomaly detection**. Outputs are saved under "
+            "`data/outputs/`."
+        )
 
 
 st.markdown("---")

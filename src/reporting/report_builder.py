@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -54,6 +54,8 @@ class RunReport:
     reference_bank_path: Optional[str] = None
     hybrid_weights: Optional[dict] = None
     notes: str = ""
+    run_metrics: Optional[dict[str, Any]] = None
+    eval_metrics: Optional[dict[str, Any]] = None
 
 
 def _fmt_time(t: float) -> str:
@@ -79,6 +81,57 @@ def write_report(report: RunReport, filename: str = "report.md") -> Path:
     lines.append(f"- **Source type:** `{report.source_type}`")
     lines.append(f"- **Source label:** {report.source_label}")
     lines.append(f"- **Sampled frames:** {report.total_sampled_frames}")
+    if report.run_metrics:
+        rm = report.run_metrics
+        lines.append("")
+        lines.append("## Operational metrics")
+        lines.append("")
+        tt = rm.get("timing_sec") or {}
+        th = rm.get("throughput") or {}
+        lines.append(
+            f"- **Wall time (total):** {tt.get('total', '?')} s — "
+            f"**Throughput:** {th.get('sampled_frames_per_sec_end_to_end', '?')} sampled frames/s (end-to-end)."
+        )
+        lines.append(
+            f"- **Embedding stage:** {tt.get('embedding', '?')} s — "
+            f"{th.get('embeddings_per_sec', '?')} embeddings/s."
+        )
+        sd = rm.get("score_distribution") or {}
+        sep = sd.get("top1_minus_median") if sd else None
+        if sep is not None:
+            lines.append(
+                f"- **Score separation (max − median):** {float(sep):.6f} "
+                f"(higher usually means clearer top outliers)."
+            )
+        lines.append("")
+    if report.eval_metrics:
+        ev = report.eval_metrics
+        lines.append("## Supervised evaluation (labeled frames)")
+        lines.append("")
+        lines.append(
+            "Metrics below require `eval_positive_frame_indices` "
+            "(synthetic glitches or manual labels). **Higher is better** for "
+            "precision/recall/F1/PR-AUC/ROC-AUC and hit@k."
+        )
+        lines.append("")
+        for key in (
+            "precision_at_k",
+            "recall_at_k",
+            "hit_at_k",
+            "f1",
+            "precision",
+            "recall",
+            "pr_auc",
+            "roc_auc",
+            "accuracy",
+            "interval_recall",
+            "k",
+            "positive_frames",
+            "n_samples",
+        ):
+            if key in ev and ev[key] is not None:
+                lines.append(f"- **{key}:** {ev[key]}")
+        lines.append("")
     if report.reference_bank_path:
         lines.append(f"- **Reference bank:** `{report.reference_bank_path}`")
     if report.hybrid_weights:
@@ -108,6 +161,9 @@ def write_report(report: RunReport, filename: str = "report.md") -> Path:
         lines.append(f"- Segment CSV: `{report.segment_csv_path}`")
     if report.plot_path:
         lines.append(f"- Score plot: `{report.plot_path}`")
+    lines.append("- Operational metrics (JSON): `run_metrics.json`")
+    if report.eval_metrics:
+        lines.append("- Supervised evaluation (JSON): `eval_metrics.json`")
     lines.append(f"- Report: `{filename}`")
     lines.append("")
 

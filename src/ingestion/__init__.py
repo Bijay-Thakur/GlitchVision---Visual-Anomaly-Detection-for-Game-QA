@@ -2,6 +2,7 @@
 
 from .youtube_stream import (  # noqa: F401
     YouTubeStreamError,
+    opera_gx_profile_dir,
     resolve_youtube_stream,
 )
 from .local_video import LocalVideoSource, save_uploaded_file  # noqa: F401

@@ -17,8 +17,16 @@ Thumbs.db
 *.swp
 .qodo/
 
-# Streamlit
-.streamlit/secrets.toml
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Streamlit local config and secrets
+.streamlit/*.toml
 
 # Internal / private docs (tracker, deep dive, interview notes, etc.)
 docs/
@@ -31,9 +39,18 @@ data/outputs/*
 data/samples/*
 !data/samples/.gitkeep
 
-# User-built reference embedding banks
+# User-built reference embedding banks and local model artifacts
 data/reference_banks/*
 !data/reference_banks/.gitkeep
+data/models/*
+!data/models/.gitkeep
+
+# Local URL lists and verification artifacts can contain private/internal videos
+data/reference_videos.txt
+data/reference_videos*.txt
+data/**/verified_urls.txt
+data/**/rejected_urls.csv
+data/**/verification_report.md
 
 # Logs and caches
 *.log
@@ -55,3 +72,9 @@ dist/
 *.webm
 *.avi
 *.mov
+
+# Exported YouTube Netscape cookies (session tokens; never commit)
+**/youtube-cookies.txt
+**/cookies-youtube.txt
+**/cookies.txt
+**/*cookies*.txt

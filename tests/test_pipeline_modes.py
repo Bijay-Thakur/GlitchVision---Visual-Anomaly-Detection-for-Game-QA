@@ -7,6 +7,7 @@ stack being available; CI skips them cleanly when it isn't.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -97,6 +98,11 @@ def test_reference_bank_build_and_reference_mode(tmp_path: Path, _deps_available
     assert result.csv_path.exists()
     assert result.mode == "reference_distance"
     assert len(result.top_records) > 0
+    assert result.run_metrics_path is not None
+    assert result.run_metrics_path.exists()
+    rm = json.loads(result.run_metrics_path.read_text(encoding="utf-8"))
+    assert rm["throughput"]["sampled_frames_per_sec_end_to_end"] > 0
+    assert result.eval_metrics_path is None
     # All top records should carry a finite reference score.
     for rec in result.top_records:
         assert rec.reference_score == rec.reference_score  # not NaN
@@ -140,6 +146,45 @@ def test_hybrid_mode_end_to_end(tmp_path: Path, _deps_available):
     for rec in result.top_records:
         assert rec.within_score == rec.within_score
         assert rec.reference_score == rec.reference_score
+
+
+def test_pipeline_writes_eval_metrics_with_labeled_indices(tmp_path: Path, _deps_available):
+    if not _deps_available:
+        pytest.skip("torch or opencv missing")
+
+    from src.pipeline import GlitchVisionPipeline, PipelineConfig
+
+    cand_path = tmp_path / "cand.mp4"
+    if not _write_synthetic_video(cand_path, mode="candidate"):
+        pytest.skip("OpenCV writer unavailable")
+
+    # Glitches at source frames 20–22 and 40–41; with fps=8 and interval_sec=0.5
+    # sampling step is 4, so anomalous sampled indices land at ~5 and ~10.
+    pipeline = GlitchVisionPipeline(
+        PipelineConfig(
+            interval_sec=0.5,
+            top_k=5,
+            max_frames=48,
+            smoothing_window=1,
+            mode="within_clip_iforest",
+            output_dir=tmp_path / "outputs",
+        )
+    )
+    result = pipeline.run(
+        video_source=str(cand_path),
+        source_type="local_upload",
+        source_label="cand.mp4",
+        eval_positive_frame_indices=[5, 10],
+        eval_glitch_intervals=(
+            {"start_frame": 5, "end_frame": 8},
+            {"start_frame": 10, "end_frame": 11},
+        ),
+    )
+    assert result.eval_metrics_path is not None
+    assert result.eval_metrics_path.exists()
+    ev = json.loads(result.eval_metrics_path.read_text(encoding="utf-8"))
+    assert "precision_at_k" in ev
+    assert ev["n_samples"] == result.total_sampled_frames
 
 
 def test_reference_mode_rejects_missing_bank(tmp_path: Path, _deps_available):

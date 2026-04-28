@@ -5,6 +5,8 @@ pandas>=2.2
 scikit-learn>=1.5
 Pillow>=10.3
 matplotlib>=3.9
+joblib>=1.4
+psutil>=5.9
 
 # PyTorch CPU build for Python 3.14
 torch>=2.11

@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-import cv2
 import numpy as np
 
 
@@ -33,6 +32,8 @@ def new_run_dir(base_dir: str | Path, prefix: str = "run") -> Path:
 
 def save_frame_image(image_bgr: np.ndarray, out_path: str | Path) -> Path:
     """Write a BGR image to disk as JPEG/PNG inferred from extension."""
+    import cv2
+
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(out), image_bgr)

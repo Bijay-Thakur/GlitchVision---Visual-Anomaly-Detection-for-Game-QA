@@ -138,6 +138,9 @@ def test_pipeline_end_to_end(tmp_path: Path):
     }
     assert expected_cols.issubset(set(df.columns))
 
+    assert result.run_metrics_path is not None
+    assert result.run_metrics_path.exists()
+
     # Segment CSV + markdown report should be produced too.
     if result.segment_csv_path is not None:
         assert result.segment_csv_path.exists()

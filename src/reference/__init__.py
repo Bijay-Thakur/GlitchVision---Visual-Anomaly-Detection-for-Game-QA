@@ -5,3 +5,4 @@ from .reference_bank import (  # noqa: F401
     ReferenceBank,
     build_reference_bank,
 )
+from . import youtube_sources  # noqa: F401

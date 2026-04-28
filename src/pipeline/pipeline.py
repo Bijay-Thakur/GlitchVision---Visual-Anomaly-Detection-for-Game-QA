@@ -14,13 +14,16 @@ Each run produces a timestamped folder under ``data/outputs/`` with:
         anomalies.csv           # per-frame scores
         segments.csv            # top anomalous segments
         score_plot.png          # per-frame score curve (if matplotlib)
+        run_metrics.json        # throughput, timing, score stats (résumé-friendly)
+        eval_metrics.json       # optional: precision@k, PR-AUC when labels are passed
         report.md               # human-readable summary
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Literal, Optional
+from typing import Callable, List, Literal, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -50,6 +53,11 @@ from ..utils import (
     smooth_scores,
     write_results_csv,
 )
+from ..utils.run_metrics import (
+    build_run_metrics_payload,
+    summarize_scores,
+    write_json as write_metrics_json,
+)
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -67,6 +75,9 @@ class PipelineConfig:
     max_frames: int = 600
     batch_size: int = 8
     backbone: str = "resnet18"
+    # Fraction of detected video duration to analyze (1.0 = full). Streams without
+    # a reliable frame count may ignore this and use the full stream.
+    duration_fraction: float = 1.0
 
     # -- scoring --
     mode: ScoringMode = "within_clip_iforest"
@@ -115,6 +126,8 @@ class PipelineResult:
     segment_csv_path: Optional[Path]
     plot_path: Optional[Path]
     report_path: Optional[Path]
+    run_metrics_path: Optional[Path]
+    eval_metrics_path: Optional[Path]
     top_records: List[AnomalyRecord]
     all_records: List[AnomalyRecord]
     top_segments: List
@@ -189,6 +202,7 @@ class GlitchVisionPipeline:
                 interval_sec=cfg.interval_sec,
                 image_size=cfg.image_size,
                 max_frames=cfg.max_frames,
+                duration_fraction=cfg.duration_fraction,
             ) as extractor:
                 frames = list(extractor.iter_frames())
 
@@ -246,8 +260,21 @@ class GlitchVisionPipeline:
         source_label: str,
         progress: Optional[ProgressCallback] = None,
         reference_bank: Optional[ReferenceBank] = None,
+        *,
+        eval_positive_frame_indices: Optional[Sequence[int]] = None,
+        eval_glitch_intervals: Optional[Sequence[Mapping[str, int]]] = None,
     ) -> PipelineResult:
-        """Execute the full pipeline on a single video source."""
+        """Execute the full pipeline on a single video source.
+
+        When ``eval_positive_frame_indices`` is set, it must list **sampled
+        frame indices** ``0 … n-1`` (same order/h count as ``anomalies.csv``)
+        that are known glitches. The run then writes ``eval_metrics.json``
+        with precision/recall @k, PR-AUC, hit@k, etc., using the same scorer
+        as production (good for synthetic or hand-labeled clips).
+
+        ``eval_glitch_intervals`` uses ``start_frame`` / ``end_frame`` in the
+        same sampled-index space for interval-level recall.
+        """
         cfg = self.config
         report = progress or (lambda p, m: None)
 
@@ -261,6 +288,7 @@ class GlitchVisionPipeline:
         report(0.02, "Preparing output directory")
         ensure_dir(cfg.output_dir)
         run_dir = new_run_dir(cfg.output_dir, prefix="run")
+        t_wall0 = time.perf_counter()
 
         # -----------------------------------------------------------
         # 1. Sample frames
@@ -271,6 +299,7 @@ class GlitchVisionPipeline:
             interval_sec=cfg.interval_sec,
             image_size=cfg.image_size,
             max_frames=cfg.max_frames,
+            duration_fraction=cfg.duration_fraction,
         ) as extractor:
             report(0.10, "Sampling frames")
             frames: List[SampledFrame] = []
@@ -288,6 +317,7 @@ class GlitchVisionPipeline:
                 "Try a longer clip or a smaller frame interval."
             )
 
+        t_after_sample = time.perf_counter()
         report(0.40, f"Sampled {len(frames)} frames total")
 
         # -----------------------------------------------------------
@@ -313,6 +343,8 @@ class GlitchVisionPipeline:
             progress_start=0.48,
             progress_end=0.75,
         )
+
+        t_after_embed = time.perf_counter()
 
         # -----------------------------------------------------------
         # 3. Score according to the selected mode
@@ -497,6 +529,55 @@ class GlitchVisionPipeline:
         except Exception:
             plot_path = None
 
+        t_before_report = time.perf_counter()
+        total_wall_sec = t_before_report - t_wall0
+        sample_wall_sec = t_after_sample - t_wall0
+        embed_wall_sec = t_after_embed - t_after_sample
+        post_wall_sec = t_before_report - t_after_embed
+
+        score_stats = summarize_scores(smoothed)
+        run_payload = build_run_metrics_payload(
+            total_wall_sec=total_wall_sec,
+            sample_wall_sec=sample_wall_sec,
+            embed_wall_sec=embed_wall_sec,
+            post_wall_sec=post_wall_sec,
+            n_sampled_frames=len(frames),
+            mode=mode,
+            backbone=embedder.backbone_name,
+            top_k=cfg.top_k,
+            score_stats=score_stats,
+            top_ranked_indices=top_indices,
+        )
+        run_metrics_path: Path = write_metrics_json(
+            run_dir / "run_metrics.json", run_payload
+        )
+
+        eval_metrics_dict: Optional[dict] = None
+        eval_metrics_path: Optional[Path] = None
+        if eval_positive_frame_indices is not None:
+            pos = {
+                int(i)
+                for i in eval_positive_frame_indices
+                if 0 <= int(i) < len(frames)
+            }
+            if pos:
+                from ..game_benchmark.evaluate import compute_metrics
+
+                y_true = np.zeros(len(frames), dtype=np.int64)
+                for i in pos:
+                    y_true[i] = 1
+                k_eval = max(cfg.top_k, min(10, len(frames)))
+                eval_metrics_dict = compute_metrics(
+                    y_true,
+                    smoothed.astype(np.float64),
+                    k=k_eval,
+                    intervals=tuple(eval_glitch_intervals or ()),
+                    predicted_intervals=(),
+                )
+                eval_metrics_path = write_metrics_json(
+                    run_dir / "eval_metrics.json", eval_metrics_dict
+                )
+
         # -----------------------------------------------------------
         # 7. Report
         # -----------------------------------------------------------
@@ -513,6 +594,7 @@ class GlitchVisionPipeline:
                     "interval_sec": cfg.interval_sec,
                     "image_size": cfg.image_size,
                     "max_frames": cfg.max_frames,
+                    "duration_fraction": cfg.duration_fraction,
                     "top_k": cfg.top_k,
                     "contamination": cfg.contamination,
                     "smoothing_window": cfg.smoothing_window,
@@ -565,6 +647,8 @@ class GlitchVisionPipeline:
                     if hybrid_result is not None
                     else None
                 ),
+                run_metrics=run_payload,
+                eval_metrics=eval_metrics_dict,
             )
             report_path = write_report(report_obj)
         except Exception:
@@ -578,6 +662,8 @@ class GlitchVisionPipeline:
             segment_csv_path=segment_csv_path,
             plot_path=plot_path,
             report_path=report_path,
+            run_metrics_path=run_metrics_path,
+            eval_metrics_path=eval_metrics_path,
             top_records=top_records,
             all_records=all_records,
             top_segments=top_segments,

@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
-import cv2
 import numpy as np
 
 
@@ -43,25 +42,32 @@ class FrameExtractor:
         interval_sec: float = 1.0,
         image_size: int = 224,
         max_frames: Optional[int] = None,
+        duration_fraction: float = 1.0,
     ) -> None:
         if interval_sec <= 0:
             raise ValueError("interval_sec must be > 0")
         if image_size <= 0:
             raise ValueError("image_size must be > 0")
+        if not (0.0 < duration_fraction <= 1.0):
+            raise ValueError("duration_fraction must be in (0, 1]")
 
         self.source = source
         self.interval_sec = float(interval_sec)
         self.image_size = int(image_size)
         self.max_frames = max_frames
+        self.duration_fraction = float(duration_fraction)
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._fps: float = 0.0
         self._total_frames: int = 0
+        self._max_duration_sec: Optional[float] = None
 
     # ---------------------------------------------------------------
     # lifecycle
     # ---------------------------------------------------------------
     def open(self) -> None:
+        import cv2
+
         cap = cv2.VideoCapture(self.source)
         if not cap.isOpened():
             cap.release()
@@ -78,6 +84,16 @@ class FrameExtractor:
         self._cap = cap
         self._fps = float(fps)
         self._total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        self._max_duration_sec: Optional[float] = None
+        if (
+            self.duration_fraction < 0.999
+            and self.duration_fraction > 0.0
+            and self._total_frames > 0
+            and self._fps > 0
+        ):
+            total_dur = self._total_frames / self._fps
+            self._max_duration_sec = total_dur * self.duration_fraction
 
     def close(self) -> None:
         if self._cap is not None:
@@ -104,9 +120,15 @@ class FrameExtractor:
 
     def estimated_sample_count(self) -> int:
         """Rough estimate of how many frames we'll emit."""
-        if self._total_frames <= 0 or self._fps <= 0:
+        if self._fps <= 0:
             return 0
-        duration = self._total_frames / self._fps
+        duration = 0.0
+        if self._total_frames > 0:
+            duration = self._total_frames / self._fps
+        if self._max_duration_sec is not None:
+            duration = min(duration, self._max_duration_sec)
+        if duration <= 0:
+            return 0
         est = int(duration / self.interval_sec) + 1
         if self.max_frames is not None:
             est = min(est, self.max_frames)
@@ -117,6 +139,8 @@ class FrameExtractor:
     # ---------------------------------------------------------------
     def iter_frames(self) -> Iterator[SampledFrame]:
         """Yield ``SampledFrame``s one at a time."""
+        import cv2
+
         if self._cap is None:
             raise RuntimeError("FrameExtractor.open() must be called first.")
 
@@ -132,13 +156,16 @@ class FrameExtractor:
             if not ok or frame is None:
                 break
 
+            timestamp = src_frame_idx / self._fps if self._fps else 0.0
+            if self._max_duration_sec is not None and timestamp >= self._max_duration_sec:
+                break
+
             if src_frame_idx % step == 0:
                 resized = cv2.resize(
                     frame,
                     (self.image_size, self.image_size),
                     interpolation=cv2.INTER_AREA,
                 )
-                timestamp = src_frame_idx / self._fps if self._fps else 0.0
                 yield SampledFrame(
                     index=emitted,
                     source_frame_idx=src_frame_idx,

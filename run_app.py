@@ -21,6 +21,11 @@ def main() -> int:
         print(f"[GlitchVision] Could not find Streamlit app at: {app_path}")
         return 1
 
+    # Streamlit loads `.streamlit/config.toml` relative to the process cwd.
+    # Without this, double-click / another working directory keeps defaults
+    # (200 MB upload cap) and can cause upload / Axios failures.
+    os.chdir(repo_root)
+
     # Make ``src`` importable when Streamlit spawns its own process.
     os.environ["PYTHONPATH"] = (
         f"{repo_root}{os.pathsep}{os.environ.get('PYTHONPATH', '')}"
@@ -36,12 +41,17 @@ def main() -> int:
         )
         return 1
 
+    # Duplicate server limits here so they apply even if config.toml is missed.
+    # maxMessageSize avoids oversized WebSocket frames during long sessions.
     sys.argv = [
         "streamlit",
         "run",
         str(app_path),
         "--server.headless=false",
         "--browser.gatherUsageStats=false",
+        "--server.maxUploadSize=1024",
+        "--server.maxMessageSize=1024",
+        "--server.websocketPingInterval=30",
     ]
     return stcli.main()
 

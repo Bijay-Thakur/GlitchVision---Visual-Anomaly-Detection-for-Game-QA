@@ -14,12 +14,19 @@ local upload.
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
 
 class YouTubeStreamError(RuntimeError):
     """Raised when we cannot obtain a frame-readable stream URL."""
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
 
 
 @dataclass(frozen=True)
@@ -86,13 +93,94 @@ def _pick_progressive_format(info: dict) -> Optional[dict]:
     return candidates[0]
 
 
-def resolve_youtube_stream(url: str) -> ResolvedStream:
+def opera_gx_profile_dir() -> Optional[Path]:
+    """Return Opera GX *user data* folder, or None if not found.
+
+    yt-dlp only knows ``opera`` = Opera **Stable**; Opera GX lives under a
+    different directory. Passing this path as the ``profile`` argument makes
+    yt-dlp read the correct Cookies DB.
+    """
+    override = os.environ.get("GLITCHVISION_OPERA_GX_USER_DATA", "").strip()
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        candidates.append(Path(appdata) / "Opera Software" / "Opera GX Stable")
+    # Some installs use a slightly different folder name
+    if appdata:
+        candidates.append(Path(appdata) / "Opera Software" / "Opera GX")
+    seen: set[str] = set()
+    for p in candidates:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.is_dir():
+            return p.resolve()
+    return None
+
+
+def _cookie_ydl_opts(
+    *,
+    cookies_file: Union[str, Path, None] = None,
+    cookies_from_browser: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Options for yt-dlp when YouTube requires login / anti-bot cookies."""
+    out: Dict[str, Any] = {}
+    cf = cookies_file
+    if cf is None:
+        for key in ("GLITCHVISION_YOUTUBE_COOKIES", "YT_DLP_COOKIE_FILE"):
+            raw = os.environ.get(key, "").strip()
+            if raw:
+                cf = Path(raw)
+                break
+    if cf:
+        p = Path(cf)
+        if p.is_file():
+            out["cookiefile"] = str(p.resolve())
+
+    browser = (cookies_from_browser or "").strip().lower() or None
+    if browser is None:
+        raw = os.environ.get("GLITCHVISION_YOUTUBE_COOKIES_BROWSER", "").strip().lower()
+        if raw:
+            browser = raw
+    if browser:
+        if browser == "opera_gx":
+            gx = opera_gx_profile_dir()
+            if gx is not None:
+                # yt-dlp ``opera`` = Opera Stable path; Opera GX needs explicit user-data dir.
+                out["cookiesfrombrowser"] = ("opera", str(gx))
+            # No GX folder: omit browser cookies (wrong to fall back to Opera Stable).
+        else:
+            out["cookiesfrombrowser"] = (browser,)
+
+    # Explicit cookie file wins over browser extraction.
+    if "cookiefile" in out:
+        out.pop("cookiesfrombrowser", None)
+
+    return out
+
+
+def resolve_youtube_stream(
+    url: str,
+    *,
+    cookies_file: Union[str, Path, None] = None,
+    cookies_from_browser: Optional[str] = None,
+) -> ResolvedStream:
     """Return a streamable URL for OpenCV.
 
     Parameters
     ----------
     url:
         A YouTube video URL (youtube.com / youtu.be / shorts).
+    cookies_file:
+        Netscape-format cookies file. Optional; can also set env
+        ``GLITCHVISION_YOUTUBE_COOKIES`` or ``YT_DLP_COOKIE_FILE``.
+    cookies_from_browser:
+        Browser name for yt-dlp (e.g. ``\"chrome\"``, ``\"edge\"``, ``\"firefox\"``).
+        Use ``\"opera_gx\"`` for **Opera GX** (see :func:`opera_gx_profile_dir`). Optional;
+        env ``GLITCHVISION_YOUTUBE_COOKIES_BROWSER`` also works.
 
     Raises
     ------
@@ -110,7 +198,7 @@ def resolve_youtube_stream(url: str) -> ResolvedStream:
             "yt-dlp is not installed. Run: pip install -r requirements.txt"
         ) from exc
 
-    ydl_opts = {
+    ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -118,13 +206,20 @@ def resolve_youtube_stream(url: str) -> ResolvedStream:
         # Hint yt-dlp to prefer progressive mp4 first.
         "format": "best[ext=mp4][protocol^=http]/best[ext=mp4]/best",
     }
+    ydl_opts.update(
+        _cookie_ydl_opts(
+            cookies_file=cookies_file,
+            cookies_from_browser=cookies_from_browser,
+        )
+    )
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as exc:  # yt-dlp raises many subclasses; keep it simple
+        msg = _strip_ansi(str(exc))
         raise YouTubeStreamError(
-            f"Could not resolve that YouTube link: {exc}"
+            f"Could not resolve that YouTube link: {msg}"
         ) from exc
 
     if info is None:

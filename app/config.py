@@ -13,7 +13,12 @@ REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 DATA_DIR: Path = REPO_ROOT / "data"
 SAMPLES_DIR: Path = DATA_DIR / "samples"
 OUTPUTS_DIR: Path = DATA_DIR / "outputs"
+# Default for `scripts/run_game_benchmark.py --out-dir` (inline in **See output** tab).
+GAME_BENCHMARK_DIR: Path = OUTPUTS_DIR / "game_benchmark"
 REFERENCE_BANKS_DIR: Path = DATA_DIR / "reference_banks"
+# Known-good YouTube URLs for reference-bank builds (one per line; `#` comments).
+REFERENCE_VIDEOS_FILE: Path = DATA_DIR / "reference_videos.txt"
+LEGACY_REFERENCE_VIDEOS_FILE: Path = REFERENCE_BANKS_DIR / "reference_videos.txt"
 
 
 @dataclass(frozen=True)
