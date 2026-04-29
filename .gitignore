@@ -29,7 +29,10 @@ Thumbs.db
 .streamlit/*.toml
 
 # Internal / private docs (tracker, deep dive, interview notes, etc.)
-docs/
+docs/*
+# Allow public docs and README screenshots through
+!docs/MODEL_CARD.md
+!docs/screenshots/
 
 # Per-run outputs (user-specific, regenerated on every run)
 data/outputs/*
